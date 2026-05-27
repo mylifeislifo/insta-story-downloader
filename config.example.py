@@ -5,8 +5,7 @@ MY_USERNAME = "내_인스타_아이디"
 MY_PASSWORD = "내_인스타_비밀번호"
 
 TARGET_ACCOUNTS = [
-    "연예인_계정명1",
-    "연예인_계정명2",
+    "mhm_nbxx",
 ]
 
 SAVE_DIR = "./stories"
