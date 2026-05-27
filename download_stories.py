@@ -1,12 +1,37 @@
 import instaloader
 import os
 import sys
+import json
+import time
+import argparse
 from datetime import datetime
 from config import MY_USERNAME, MY_PASSWORD, TARGET_ACCOUNTS, SAVE_DIR
 
+TRACKING_FILE = ".downloaded_ids.json"
+
+
+# ──────────────────────────────────────────
+# 중복 추적
+# ──────────────────────────────────────────
+
+def load_downloaded() -> set:
+    if os.path.exists(TRACKING_FILE):
+        with open(TRACKING_FILE, "r") as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_downloaded(ids: set):
+    with open(TRACKING_FILE, "w") as f:
+        json.dump(list(ids), f)
+
+
+# ──────────────────────────────────────────
+# 로더 / 로그인
+# ──────────────────────────────────────────
 
 def get_loader():
-    L = instaloader.Instaloader(
+    return instaloader.Instaloader(
         dirname_pattern=os.path.join(SAVE_DIR, "{target}"),
         filename_pattern="{date_utc:%Y%m%d_%H%M%S}",
         download_video_thumbnails=False,
@@ -15,7 +40,6 @@ def get_loader():
         compress_json=False,
         quiet=True,
     )
-    return L
 
 
 def login(L):
@@ -47,71 +71,81 @@ def login(L):
         return False
 
 
-def download_stories(L, profile):
-    """현재 올라와 있는 스토리 다운로드 (24시간짜리)"""
+# ──────────────────────────────────────────
+# 다운로드
+# ──────────────────────────────────────────
+
+def download_stories(L, profile, downloaded: set) -> int:
     try:
         stories = list(L.get_stories(userids=[profile.userid]))
-
         if not stories:
-            print(f"  └ [스토리] 현재 올라온 스토리 없음")
+            print("  └ [스토리] 현재 없음")
             return 0
 
-        count = 0
+        new, skip = 0, 0
         for story in stories:
             for item in story.get_items():
-                L.download_storyitem(item, target=os.path.join(SAVE_DIR, profile.username, "stories"))
-                count += 1
+                media_id = str(item.mediaid)
+                if media_id in downloaded:
+                    skip += 1
+                    continue
+                folder = os.path.join(SAVE_DIR, profile.username, "stories")
+                os.makedirs(folder, exist_ok=True)
+                L.download_storyitem(item, target=folder)
+                downloaded.add(media_id)
+                new += 1
 
-        print(f"  └ [스토리] {count}개 저장")
-        return count
+        print(f"  └ [스토리] 신규 {new}개 저장 / {skip}개 중복 스킵")
+        return new
 
     except instaloader.exceptions.PrivateProfileNotFollowedException:
-        print(f"  └ [스토리] 비공개 계정 (팔로우 필요)")
+        print("  └ [스토리] 비공개 계정 (팔로우 필요)")
         return 0
     except Exception as e:
         print(f"  └ [스토리] 오류: {e}")
         return 0
 
 
-def download_highlights(L, profile):
-    """하이라이트 전체 다운로드 (영구 보관된 스토리 모음)"""
+def download_highlights(L, profile, downloaded: set) -> int:
     try:
         highlights = list(L.get_highlights(profile))
-
         if not highlights:
-            print(f"  └ [하이라이트] 없음")
+            print("  └ [하이라이트] 없음")
             return 0
 
-        count = 0
+        new, skip = 0, 0
         for highlight in highlights:
             folder = os.path.join(SAVE_DIR, profile.username, "highlights", highlight.title)
             os.makedirs(folder, exist_ok=True)
             for item in highlight.get_items():
+                media_id = str(item.mediaid)
+                if media_id in downloaded:
+                    skip += 1
+                    continue
                 L.download_storyitem(item, target=folder)
-                count += 1
+                downloaded.add(media_id)
+                new += 1
 
-        print(f"  └ [하이라이트] {len(highlights)}개 묶음, 총 {count}개 저장")
-        return count
+        print(f"  └ [하이라이트] 신규 {new}개 저장 / {skip}개 중복 스킵")
+        return new
 
     except Exception as e:
         print(f"  └ [하이라이트] 오류: {e}")
         return 0
 
 
-def main():
-    os.makedirs(SAVE_DIR, exist_ok=True)
+# ──────────────────────────────────────────
+# 1회 실행
+# ──────────────────────────────────────────
 
-    print(f"\n{'='*40}")
-    print(f"  인스타 스토리 다운로더")
-    print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*40}\n")
+def run_once(L):
+    downloaded = load_downloaded()
+    total_new = 0
 
-    L = get_loader()
+    print(f"\n{'─'*44}")
+    print(f"  🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'─'*44}")
 
-    if not login(L):
-        sys.exit(1)
-
-    total = 0
     for username in TARGET_ACCOUNTS:
         print(f"\n[→] {username}")
         try:
@@ -120,13 +154,55 @@ def main():
             print(f"  └ 계정 없음: {username}")
             continue
 
-        total += download_stories(L, profile)
-        total += download_highlights(L, profile)
+        total_new += download_stories(L, profile, downloaded)
+        total_new += download_highlights(L, profile, downloaded)
 
-    print(f"\n{'='*40}")
-    print(f"[완료] 총 {total}개 저장 → {os.path.abspath(SAVE_DIR)}")
-    print(f"{'='*40}\n")
+    save_downloaded(downloaded)
+    print(f"\n  ✅ 이번 회차 신규 {total_new}개 저장")
+    return total_new
+
+
+# ──────────────────────────────────────────
+# 메인
+# ──────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="인스타 스토리 자동 다운로더")
+    parser.add_argument(
+        "--interval", type=int, default=0,
+        help="반복 실행 간격 (분). 0이면 1회만 실행. 예: --interval 30"
+    )
+    args = parser.parse_args()
+
+    os.makedirs(SAVE_DIR, exist_ok=True)
+
+    print(f"\n{'═'*44}")
+    print(f"  📸 인스타 스토리 다운로더")
+    if args.interval:
+        print(f"  🔁 {args.interval}분마다 자동 실행")
+    print(f"{'═'*44}")
+
+    L = get_loader()
+    if not login(L):
+        sys.exit(1)
+
+    if args.interval == 0:
+        # 1회 실행
+        run_once(L)
+    else:
+        # 주기 반복
+        round_num = 1
+        while True:
+            print(f"\n  [Round {round_num}]")
+            run_once(L)
+            print(f"\n  ⏳ {args.interval}분 후 다시 실행... (Ctrl+C로 종료)")
+            time.sleep(args.interval * 60)
+            round_num += 1
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n[중단됨] 다운로더 종료.")
+        sys.exit(0)
